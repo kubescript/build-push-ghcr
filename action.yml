@@ -1,0 +1,159 @@
+name: 'Build and push container to GHCR'
+description: >
+  Builds a Docker image and pushes it to GitHub Container Registry (GHCR).
+  Handles tag generation, layer caching, multi-arch builds, and GHCR authentication.
+  The calling job must declare: permissions: packages: write.
+
+inputs:
+  imageName:
+    description: "Image name under ghcr.io/<owner>/ (e.g., my-service)"
+    required: true
+  token:
+    description: >
+      GitHub token used to authenticate with GHCR and populate the github_packages_token build secret.
+      Must have packages:write permission. Defaults to the built-in github.token, which is sufficient
+      for repos owned by the same org/user as the image. Pass a PAT only when pushing to a different owner.
+    required: false
+    default: ${{ github.token }}
+  dockerfilePath:
+    description: "Path to Dockerfile relative to repo root"
+    required: false
+    default: "Dockerfile"
+  dockerContext:
+    description: "Docker build context relative to repo root"
+    required: false
+    default: "."
+  dockerfileTarget:
+    description: "Target stage in a multi-stage Dockerfile. Leave empty to build the final stage."
+    required: false
+    default: ""
+  buildArgs:
+    description: |
+      Extra Docker build arguments passed to the Dockerfile as ARG values, one KEY=VALUE per line.
+      These must match ARG declarations inside your Dockerfile — undeclared args are silently ignored by Docker.
+      Example:
+        buildArgs: |
+          APP_ENV=production
+          SENTRY_DSN=https://example.ingest.sentry.io/123
+    required: false
+    default: ""
+  tags:
+    description: |
+      Tag rules for docker/metadata-action, one rule per line.
+      Each rule controls when and how a tag is generated. The defaults cover the most common scenarios:
+        - pr-<number>     → on pull request events
+        - <branch-name>   → on branch push events (e.g., "main", "staging")
+        - sha-<short-sha> → always, useful for tracing exactly which commit is running
+        - <semver>        → on git tags matching vX.Y.Z (e.g., v1.2.3 → 1.2.3)
+        - latest          → only when pushing to the default branch (e.g., main)
+      Override this input to remove, rename, or add tag types for your project.
+      Full rule reference: https://github.com/docker/metadata-action#tags-input
+    required: false
+    default: |
+      type=ref,event=pr,prefix=pr-
+      type=ref,event=branch
+      type=sha,prefix=sha-,format=short
+      type=semver,pattern={{version}}
+      type=raw,value=latest,enable={{is_default_branch}}
+  labels:
+    description: |
+      OCI image labels applied to the built image, one KEY=VALUE per line.
+      Labels are metadata — they don't affect runtime behaviour but are visible in registries and `docker inspect`.
+      The defaults follow the OCI image spec and are readable by most registries (GitHub, Docker Hub, etc.).
+      Add extra lines to include team-specific labels (e.g., org.opencontainers.image.vendor=Acme).
+      Full label spec: https://github.com/opencontainers/image-spec/blob/main/annotations.md
+    required: false
+    default: |
+      org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+      org.opencontainers.image.revision=${{ github.sha }}
+  platforms:
+    description: |
+      Comma-separated list of target CPU architectures to build for.
+      Omit this input (or leave empty) to build only for the runner's native architecture (linux/amd64 on standard GitHub runners).
+      Use linux/amd64,linux/arm64 to produce a multi-arch manifest that runs on both x86 servers and ARM (e.g., Apple Silicon, Graviton).
+      Note: multi-arch builds use QEMU emulation and are significantly slower than native builds.
+    required: false
+    default: ""
+  cacheFrom:
+    description: |
+      Cache source passed to docker/build-push-action `cache-from`.
+      The default (type=gha) uses GitHub Actions cache to restore layer cache across runs, speeding up rebuilds.
+      Set to an empty string to disable caching entirely (e.g., when debugging cache-related issues).
+    required: false
+    default: "type=gha"
+  cacheTo:
+    description: |
+      Cache destination passed to docker/build-push-action `cache-to`.
+      The default (type=gha,mode=max) saves all layers to GitHub Actions cache (not just the final stage).
+      This input is automatically ignored when push is false, to avoid writing stale cache on validation runs.
+      Set to an empty string to disable cache writes without disabling cache reads.
+    required: false
+    default: "type=gha,mode=max"
+  push:
+    description: |
+      Whether to push the built image to GHCR after a successful build.
+      Set to false to run a build-only (validation) pass — useful for confirming the Dockerfile builds
+      on pull requests without publishing an image.
+      Accepts the string 'true' or 'false'.
+    required: false
+    default: "true"
+
+outputs:
+  version:
+    description: "Version resolved by docker/metadata-action (e.g. '1.2.3' on tag builds, branch name otherwise)."
+    value: ${{ steps.meta.outputs.version }}
+  tags:
+    description: "Full newline-separated list of all tags pushed (e.g. 'staging\\nsha-abc1234')."
+    value: ${{ steps.meta.outputs.tags }}
+  image:
+    description: "Full image repository without tag (e.g., ghcr.io/my-org/my-service)"
+    value: ${{ steps.image.outputs.value }}
+  digest:
+    description: "Image digest of the pushed manifest (sha256:...)"
+    value: ${{ steps.push.outputs.digest }}
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Resolve image repository
+      id: image
+      shell: bash
+      run: echo "value=ghcr.io/${{ github.repository_owner }}/${{ inputs.imageName }}" >> "$GITHUB_OUTPUT"
+
+    - name: Compute image tags and labels
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ steps.image.outputs.value }}
+        tags: ${{ inputs.tags }}
+        labels: ${{ inputs.labels }}
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ inputs.token }}
+
+    - name: Build and push image
+      id: push
+      uses: docker/build-push-action@v6
+      with:
+        context: ${{ inputs.dockerContext }}
+        file: ${{ inputs.dockerfilePath }}
+        target: ${{ inputs.dockerfileTarget }}
+        platforms: ${{ inputs.platforms }}
+        push: ${{ inputs.push }}
+        build-args: ${{ inputs.buildArgs }}
+        cache-from: ${{ inputs.cacheFrom }}
+        cache-to: ${{ inputs.push == 'true' && inputs.cacheTo || '' }}
+        secrets: |
+          github_packages_token=${{ inputs.token }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
