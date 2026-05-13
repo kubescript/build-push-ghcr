@@ -29,8 +29,12 @@ inputs:
     description: 'Docker build arguments, one KEY=VALUE per line'
     required: false
     default: ''
-  tags:
-    description: 'Tag rules for docker/metadata-action, one rule per line. See https://github.com/docker/metadata-action#tags-input'
+  tag:
+    description: 'Explicit tag to use (e.g. sha-abc1234, 1.2.3, my-feature). When set, overrides `tag-rules` — the image is pushed with this single tag, and the `version` output equals this value. Useful when the caller already knows the desired immutable tag.'
+    required: false
+    default: ''
+  tag-rules:
+    description: 'Tag rules for docker/metadata-action, one rule per line (ignored when `tag` is set). See https://github.com/docker/metadata-action#tags-input'
     required: false
     default: |
       type=ref,event=pr,prefix=pr-
@@ -88,7 +92,7 @@ runs:
       uses: docker/metadata-action@v5
       with:
         images: ${{ steps.image.outputs.value }}
-        tags: ${{ inputs.tags }}
+        tags: ${{ inputs.tag != '' && format('type=raw,value={0}', inputs.tag) || inputs.tag-rules }}
         labels: ${{ inputs.labels }}
 
     - name: Set up Docker Buildx

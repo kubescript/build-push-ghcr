@@ -25,7 +25,10 @@ By default this action delegates tag generation to [`docker/metadata-action`](ht
 | Pull request | `pr-<number>`, `sha-<short>` |
 | Git tag `v1.2.3` | `1.2.3`, `sha-<short>` |
 
-You can fully override the tag rules via the `tags` input.
+You can override the auto-generation in two ways:
+
+- Pass `tag` with an explicit value (e.g. `sha-abc1234`, `1.2.3`) — only that tag is pushed, and `version` output equals it. Use this when the caller already knows the desired tag.
+- Pass `tag-rules` with custom rules for `docker/metadata-action` — replaces the defaults.
 
 ## Prerequisites
 
@@ -55,7 +58,8 @@ This action does **not** check out your repository — call `actions/checkout` b
 | `docker-build-context` | Docker build context directory | No | `.` |
 | `docker-build-target` | Multi-stage build target | No | `''` |
 | `docker-build-args` | Build args, one `KEY=VALUE` per line | No | `''` |
-| `tags` | Tag rules for `docker/metadata-action`, one per line | No | _see action.yml_ |
+| `tag` | Explicit tag to use (e.g. `sha-abc1234`, `1.2.3`). When set, overrides `tag-rules` and the image is pushed with this single tag. | No | `''` |
+| `tag-rules` | Tag rules for `docker/metadata-action`, one per line (ignored when `tag` is set) | No | _see action.yml_ |
 | `labels` | OCI image labels, one `KEY=VALUE` per line | No | OCI source/revision |
 | `platforms` | Comma-separated target platforms (e.g., `linux/amd64,linux/arm64`) | No | `''` (runner native) |
 | `cache-from` | BuildKit cache source | No | `type=gha` |
@@ -183,13 +187,26 @@ jobs:
     docker-file-path: ./services/api/Dockerfile
 ```
 
+### Explicit Tag
+
+When the caller already knows the tag (e.g. an immutable sha-based tag for GitOps), pass it directly:
+
+```yaml
+- uses: kubescript/build-push-ghcr@v1
+  with:
+    image-name: my-service
+    tag: sha-${{ github.sha }}
+```
+
+Only this tag is pushed; the `version` output equals the value passed in.
+
 ### Custom Tag Rules
 
 ```yaml
 - uses: kubescript/build-push-ghcr@v1
   with:
     image-name: my-service
-    tags: |
+    tag-rules: |
       type=ref,event=branch
       type=sha,prefix=,format=long
       type=raw,value=stable,enable={{is_default_branch}}
